@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
 from scipy.signal import argrelextrema
 from scipy.signal import savgol_filter
+from scipy import stats
 
 from itertools import combinations
 from itertools import combinations_with_replacement
@@ -2549,6 +2550,13 @@ class QuantParameter:
             self.relstd = self.std / self.value
         else:
             self.relstd = 0.
+            
+        if 'bootstrap' in kwargs:
+            self.pc1 = np.percentile(kwargs['bootstrap'], 1)
+            self.pc99 = np.percentile(kwargs['bootstrap'], 99)
+        else:
+            self.pc1 = np.nan
+            self.pc99 = np.nan
         
         # add truth-related properties
         if 'truth' in kwargs:
@@ -2556,8 +2564,8 @@ class QuantParameter:
         else:
             self.truth = np.nan
         if np.isnan(self.truth) or self.truth == None:
-            self.error = np.isnan
-            self.relerror = np.isnan
+            self.error = np.nan
+            self.relerror = np.nan
         else:
             self.error = self.value - self.truth
             self.relerror = self.error / self.truth
@@ -2753,7 +2761,7 @@ class QuantModel:
         # if not, proceed with individual data input
         if success == False:
             # get values and stdevs for input parameters
-            temp = {}
+            temp = {'FXJ': {}, 'FXB': {}, 'JA': {}, 'FXJ_JA': {}}
             if 'params' in kwargs:
                 params = kwargs['params']
                 if isinstance(params, QuantParameter):
@@ -2762,11 +2770,30 @@ class QuantModel:
                         temp[key] = {}
                         for prop in params[key]:
                             temp[key][prop] = params[key][prop]
+                    if 'FXJ_JA' in params.keys():
+                        temp['FXJ_JA'] = {}
+                        for prop in params[key]:
+                            temp['FXJ_JA'][prop] = params['FXJ_JA'][prop]
+                    else:
+                        temp['FXJ_JA'] = {
+                            'value': params['FXJ'].value / params['JA'].value,
+                            'std': np.sqrt((params['FXJ'].std/params['FXJ'].value)**2 + (params['JA'].std/params['JA'].value)**2)
+                        }
 
                 elif isinstance(params, lmfit.Parameters):
                     # handle input params as LMFIT Parameters object
                     for key in ['FXJ', 'FXB', 'JA']:
                         temp[key] = {'value': params[key].value, 'std': params[key].stderr}
+                    if 'FXJ_JA' in params:
+                        temp['FXJ_JA'] = {
+                            'value': params['FXJ_JA'].value,
+                            'std': params['FXJ_JA'].stderr
+                        }
+                    else:
+                        temp['FXJ_JA'] = {
+                            'value': params['FXJ'].value / params['JA'].value,
+                            'std': np.sqrt((params['FXJ'].stderr/params['FXJ'].value)**2 + (params['JA'].stderr/params['JA'].value)**2)
+                        }
 
                 elif isinstance(params, dict):
                     # handle input params as dict
@@ -2776,10 +2803,22 @@ class QuantModel:
                     else:
                         for key in ['FXJ', 'FXB', 'JA']:
                             temp[key] = {'value': params[key]}
-                            if key+"_std" not in params.keys():
-                                temp[key]['std'] = 0.
-                            else:
+                            if key+"_std" in params.keys():
                                 temp[key]['std'] = params[key+"_std"]
+                            else:
+                                temp[key]['std'] = 0.
+                        if 'FXJ_JA' in params.keys():
+                            temp['FXJ_JA']['value'] = params['FXJ_JA']
+                            if "FXJ_JA_std" in params.keys():
+                                temp['FXJ_JA']['std'] = params["FXJ_JA_std"]
+                            else:
+                                temp['FXJ_JA']['std'] = 0.
+                        else:
+                            temp['FXJ_JA']['value'] = params['FXJ'] / params['JA']
+                            if "FXJ_std" in params.keys() and "JA_std" in params.keys():
+                                temp["FXJ_JA"]['std'] = np.sqrt((params["FXJ_std"]/params['FXJ'])**2 + (params["JA_std"]/params['JA'])**2)
+                            else:
+                                temp[key]['std'] = 0.
 
                 else:
                     # handle input params as list (order: FXJ, FXB, JA)
@@ -2793,17 +2832,29 @@ class QuantModel:
                 # handle each input individually
                 for key in ['FXJ', 'FXB', 'JA']:
                     temp[key] = {'value': kwargs[key]}
-                    if key+"_std" not in kwargs:
-                        temp[key]['std'] = 0.
+                    if key+"_std" in kwargs:
+                        temp[key]['std'] = kwargs[key+"_std"]
                     else:
-                        temp[key]['std'] = params[key+"_std"]
+                        temp[key]['std'] = 0.
+                if 'FXJ_JA' in kwargs:
+                    temp['FXJ_JA']['value'] = kwargs['FXJ_JA']
+                    if "FXJ_JA_std" in kwargs:
+                        temp['FXJ_JA']['std'] = kwargs["FXJ_JA_std"]
+                    else:
+                        temp['FXJ_JA']['std'] = np.sqrt((kwargs["FXJ_std"]/kwargs['FXJ'])**2 + (kwargs["JA_std"]/kwargs['JA'])**2)
+                else:
+                    temp['FXJ_JA']['value'] = kwargs['FXJ'] / kwargs['JA']
+                    if "FXJ_std" in kwargs and "JA_std" in kwargs:
+                        temp["FXJ_JA"]['std'] = np.sqrt((kwargs["FXJ_std"]/kwargs['FXJ'])**2 + (kwargs["JA_std"]/kwargs['JA'])**2)
+                    else:
+                        temp[key]['std'] = 0.
 
             else:
                 # no valid inputs were passed to __init__, raise Exception
                 raise Exception("QuantModel instance must receive args for either params or individual parameters!")
 
             # add each parameter to QuantModel instance
-            for key in ['FXJ', 'FXB', 'JA']:
+            for key in ['FXJ', 'FXB', 'JA', 'FXJ_JA']:
                 if 'truths' in kwargs and 'truth' not in temp[key].keys():
                     if key in kwargs['truths'].keys():
                         temp[key]['truth'] = kwargs['truths'][key]
@@ -2887,17 +2938,129 @@ class QuantModel:
              return detection_limit(self, limit='lower', **kwargs)
     
     # end of QuantModel class
+    
+# quality of life functions
+
+def parameter2string(param, n=2, e=False):
+    # convert mean and uncertainty to string representation as follows: (mean±std)x10^mag
+    if isinstance(param, QuantParameter):
+        median = param.median
+    else:
+        median = param
+        
+    if e == True:
+        mag_joiner = "E"
+    else:
+        mag_joiner = "x10^"
+        
+    if np.isnan(median):
+        text = "NaN"
+    elif np.isinf(median):
+        text = "inf"
+    elif median == 0:
+        text = "0"
+    else:
+        mag = int(np.floor(np.log10(median)))
+        c = median / 10**mag
+        if e == True:
+            text = f"{c:.{n}f}{mag_joiner}{mag:.0f}"
+        else:
+            text = f"{c:.{n}f}{mag_joiner}{mag:.0f}"
+    return text
+
+def percentiles2string(param=None, percentiles=(16, 84), n=2, include_median=False, e=False, **kwargs):
+    # convert median and percentiles to string representation as follows: (median, lower - upper)x10^mag
+    
+    if isinstance(param, QuantParameter):
+        median = param.median
+        lower = np.nanpercentile(param.bootstrap, percentiles[0])
+        upper = np.nanpercentile(param.bootstrap, percentiles[1])
+    elif 'median' in kwargs and 'lower' in kwargs and 'upper' in kwargs:
+        median = kwargs['median']
+        lower = kwargs['lower']
+        upper = kwargs['upper']
+    elif isinstance(param, np.ndarray):
+        # handle input as distribution 
+        median = np.nanmedian(param)
+        lower = np.nanpercentile(param, percentiles[0])
+        upper = np.nanpercentile(param, percentiles[1])
+    else:
+        raise Exception("percentiles2string() must receive either QuantParameter object, or median,lower,upper kwargs, or distribution array!")
+        
+    mag = None
+    if include_median == True:
+        if np.isnan(median):
+            mtext = "NaN"
+        elif np.isinf(median):
+            mtext = "inf"
+        elif median == 0:
+            mtext = "0"
+        else:
+            mag = np.floor(np.log10(np.abs(median)))
+            c = median / 10**mag
+            mtext = f"{c:.{n}f}"
+        
+    text = []
+    for val in [lower, upper]:
+        if np.isnan(val):
+            text.append("NaN")
+        elif np.isinf(val):
+            text.append("inf")
+        elif val == 0:
+            text.append("0")
+        else:
+            if mag == None:
+                mag = np.floor(np.log10(np.abs(val)))
+            c = val / 10**mag
+            text.append(f"{c:.{n}f}")
+    if mag == None:
+        mag = 0
+        
+    if e == True:
+        mag_joiner = "E"
+    else:
+        mag_joiner = "x10^"
+    
+    if include_median == True:
+        return f"({mtext}, {'-'.join(text)}){mag_joiner}{mag:.0f}"
+    else:
+        return f"({'-'.join(text)}){mag_joiner}{mag:.0f}"
+    
+def range2string(lower, upper, n=2, e=False):
+    
+    if e == True:
+        mag_joiner = "E"
+    else:
+        mag_joiner = "x10^"
+    
+    text = []
+    for val in [lower, upper]:
+        if np.isnan(val):
+            text.append("NaN")
+        elif np.isinf(val):
+            text.append("inf")
+        elif val == 0:
+            text.append("0")
+        else:
+            mag = np.floor(np.log10(np.abs(val)))
+            c = val / 10**mag
+            if e == True:
+                text.append(f"{c:.{n}f}{mag_joiner}{mag:.0f}")
+            else:
+                text.append(f"{c:.{n}f}{mag_joiner}{mag:.0f}")
+        
+    return "-".join(text)
         
 # functions for bootstrapping
 
-def bootstrap_resample_indices(indices, seed=626):
+def bootstrap_resample_indices(indices, seed=None):
     # set up random number generator
-    rng = np.random.default_rng(int(seed))
+    rng = np.random.default_rng(seed)
     # get random resample of indices
     resampled = rng.choice(indices, size=len(indices), replace=True)
     return resampled
 
-def bootstrap_resample_data(data, n_bootstraps, seed=626):
+def bootstrap_resample_data(data, n_bootstraps, seed=None):
     # function for bootstrap resampling of a dataset
     
     # set up storage array
@@ -2910,7 +3073,10 @@ def bootstrap_resample_data(data, n_bootstraps, seed=626):
         temp = data[i1][~np.isnan(data[i1])]
         for i2 in range(n_bootstraps):
             # set up random number generator
-            rng = np.random.default_rng(int(seed) + 10*i1 + 100*i2)
+            if seed == None:
+                rng = np.random.default_rng()
+            else:
+                rng = np.random.default_rng(int(seed) + 10*i1 + 100*i2)
             # get random resample
             resample = rng.choice(range(len(temp)), size=len(temp), replace=True)
             resampled_means[i1,i2] = np.nanmean(temp[resample])
@@ -2939,6 +3105,12 @@ def get_covariance_matrix(data, return_data=False):
 def concentration_curve(model, IR, debug=False):
     # function for predicting concentration from intensity using quantitative model
     curve = (IR - model["FXB"]) / (model["FXJ"] - model["JA"] * IR)
+    return curve
+
+def concentration_curves(model, IR, debug=False):
+    # function for predicting intensity distribution using all models from bootstrapping
+    params = {prop: model[prop].bootstrap[:,np.newaxis] for prop in ['FXJ', 'FXB', 'JA']}
+    curve = (IR[np.newaxis,:] - params["FXB"]) / (params["FXJ"] - params["JA"] * IR[np.newaxis,:])
     return curve
 
 def concentration_error(model, IR, IR_err=0., debug=False):
@@ -2974,6 +3146,12 @@ def concentration_error(model, IR, IR_err=0., debug=False):
 def intensity_curve(model, CR, debug=False):
     # function for predicting intensity from concentration using quantitative model
     curve = (model["FXJ"] * CR + model["FXB"]) / (model["JA"] * CR + 1)
+    return curve
+
+def intensity_curves(model, CR, debug=False):
+    # function for predicting intensity distribution using all models from bootstrapping
+    params = {prop: model[prop].bootstrap[:,np.newaxis] for prop in ['FXJ', 'FXB', 'JA']}
+    curve = (params["FXJ"] * CR[np.newaxis,:] + params["FXB"]) / (params["JA"] * CR[np.newaxis,:] + 1)
     return curve
 
 def intensity_error(model, CR, CR_err=0., debug=False):
@@ -3021,27 +3199,29 @@ def intensity_fit(model, CR, IR, weights):
     else:
         return (IR - curve) * weights
 
-def intensity_fit_script(CR, IR, IR_err=None, A=0.01, B=0.01, J=1., F=1., X=1., noise=0., log=True, vary_A=True, vary_B=True, vary_FX=True, outlier_threshold=2., report_threshold=0.2, title="", plot_variance=False, fig_dir="./figures/", tabs=0, save_plot=False, show_plot=True, debug=False):
+def intensity_fit_script(CR, IR, IR_err=None, A=0.01, B=0.01, J=1., F=1., X=1., noise=0., truths={}, log=True, vary_A=True, vary_B=True, vary_FX=True, outlier_threshold=2., report_threshold=0.2, title="", plot_variance=False, fig_dir="./figures/", tabs=0, return_quantmodel=False, save_plot=False, show_plot=True, debug=False):
     # function for setting up and fitting the quantitative model on an input dataset of concentration and intensity ratios
     # argument summary:
-    #   - CR:           array of concentration ratios for fitting
-    #   - IR:           array of intensity ratios for fitting
-    #   - IR_err:       array of intensity ratio uncertainties
-    #   - A:            initial value for parameter A (float)
-    #   - B:            initial value for parameter B (float)
-    #   - J:            initial value for parameter J (float)
-    #   - F:            initial value for parameter F (float)
-    #   - X:            initial value for parameter X (float)
-    #   - noise:        estimated background noise level (float)
-    #   - log:          is the fitting in log space or not? (boolean)
-    #   - vary_A:       is the A parameter allowed to vary? (boolean)
-    #   - vary_B:       is the B parameter allowed to vary? (boolean)
-    #   - vary_FX:      is the FX parameter allowed to vary? (boolean)
+    #   - CR:               array of concentration ratios for fitting
+    #   - IR:               array of intensity ratios for fitting
+    #   - IR_err:           array of intensity ratio uncertainties
+    #   - A:                initial value for parameter A (float)
+    #   - B:                initial value for parameter B (float)
+    #   - J:                initial value for parameter J (float)
+    #   - F:                initial value for parameter F (float)
+    #   - X:                initial value for parameter X (float)
+    #   - noise:            estimated background noise level (float)
+    #   - log:              is the fitting in log space or not? (boolean)
+    #   - vary_A:           is the A parameter allowed to vary? (boolean)
+    #   - vary_B:           is the B parameter allowed to vary? (boolean)
+    #   - vary_FX:          is the FX parameter allowed to vary? (boolean)
     #   - outlier_threshold:    minimum factor for defining outliers based on st.dev. of 1st fit residuals (float)
     #   - report_threshold:     minimum fraction of data points that are outliers before a report is triggered
-    #   - title:        name to put on generated figures
+    #   - title:                name to put on generated figures
     #   - plot_variance:        generate a figure showing co-variances? (boolean)
-    #   - fig_dir:      directory for saving figure files
+    #   - fig_dir:              directory for saving figure files
+    #   - tabs:                 number of tabs to put before debug messages (str)
+    #   - debug:                if True print all debug messages in viewer (boolean)
     
     # clean up input data
     CR = CR.astype(np.float64)
@@ -3197,14 +3377,29 @@ def intensity_fit_script(CR, IR, IR_err=None, A=0.01, B=0.01, J=1., F=1., X=1., 
                 print("    "*(tabs), "%3s = %0.1E (no err)" % (prop, result.params[prop].value))
             else:
                 print("    "*(tabs), "%3s = %0.1E +/- %0.1E" % (prop, result.params[prop].value, result.params[prop].stderr))
-    # return fitted model
-    return result.params
+    
+    if return_quantmodel == True:
+        # generate QuantModel
+        model = QuantModel(
+            params = result.params,
+            corr_matrix = np.full((3,3), np.nan),
+            cov_matrix = np.full((3,3), np.nan),
+            truths = truths,
+            training_data = {},
+            bootstrap_data = {}
+        )
+        return model
+    else:
+        # return fitted model
+        return result.params
 
 
-def bootstrap_intensity_fit_script(CR, IR, n_bootstraps=1000, sample_size=1., report_threshold=1., truths={}, title="", seed=626, plot_covariance=False, fig_dir="./figures/", x_lims={'FXJ': (None, None), 'FXB': (None, None), 'JA': (None, None), 'FXJ_JA': (None, None)}, save_plot=False, show_plot=True, debug=False, tabs=0, **kwargs):
+def bootstrap_intensity_fit_script(CR, IR, n_bootstraps=1000, sample_size=1., report_threshold=1., truths={}, title="", seed=None, plot_covariance=False, fig_dir="./figures/", x_lims={}, plot_linear=False, show_text=True, save_plot=False, show_plot=True, debug=False, tabs=0, **kwargs):
     # function for doing bootstrap training
     # argument summary:
     #   - 
+    #   - tabs:             number of tabs to put before debug messages (str)
+    #   - debug:            if True print all debug messages in viewer (boolean)
     
     # check input data
     n_bootstraps = int(n_bootstraps)
@@ -3238,7 +3433,11 @@ def bootstrap_intensity_fit_script(CR, IR, n_bootstraps=1000, sample_size=1., re
         # for each bootstrap resample
 
         # fit model to intensity curve
-        fit_output = intensity_fit_script(CR, IR_bstrp_av[:,i], IR_err=IR_bstrp_std[:,i], show_plot=False, save_plot=False, debug=False, report_threshold=report_threshold, **kwargs)
+        if i == 0 and debug == True:
+            debug1=True
+        else:
+            debug1=False
+        fit_output = intensity_fit_script(CR, IR_bstrp_av[:,i], IR_err=IR_bstrp_std[:,i], report_threshold=report_threshold, show_plot=False, save_plot=False, debug=debug1)
 
         # add fitted parameter values to storage array
         for prop in ['FXJ', 'FXB', 'JA']:
@@ -3251,42 +3450,58 @@ def bootstrap_intensity_fit_script(CR, IR, n_bootstraps=1000, sample_size=1., re
 
     # get means and standard deviations for each parameter
     mean_params = {}
-    for prop in ['FXJ', 'FXB', 'JA', 'FXJ_JA']:
+    for prop in ['FXJ', 'FXB', 'JA']:
         # create QuantParameter instance for this parameter
+        if isinstance(truths, dict):
+            if prop in truths:
+                truth = truths[prop]
+            else:
+                truth = np.nan
         mean_params[prop] = QuantParameter(
             bootstrap = bootstrap_results[prop],
             value = np.nanmean(bootstrap_results[prop]),
             mean = np.nanmean(bootstrap_results[prop]),
             median = np.nanmedian(bootstrap_results[prop]),
             std = np.nanstd(bootstrap_results[prop]),
-            truth = np.nan
+            truth = truth
         )
         
-        if isinstance(truths, dict):
-            if prop in truths:
-                mean_params[prop].truth = truths[prop]
-                
-        if x_lims[prop] == (None, None):
-            # no ax limits defined for this property, get best results based on distribution of values
-            if mean_params[prop].value == 0. and mean_params[prop].std == 0.:
-                x_lims[prop] = (-0.001, 0.001)
-            else:
-                x_lims[prop] = (
-                    np.amin([mean_params[prop] - 5 * mean_params[prop].std, 0.99*mean_params[prop]]),
-                    np.amax([mean_params[prop] + 5 * mean_params[prop].std, 1.01*mean_params[prop]])
-                )
+    # do the same for FXJ/JA
+    prop = 'FXJ_JA'
+    if isinstance(truths, dict):
+        if prop in truths:
+            truth = truths[prop]
+        else:
+            truth = np.nan
+    # calculate std directly from medians and std of FXJ, JA to avoid infs
+    std = (mean_params['FXJ'].median / mean_params['JA'].median) * np.sqrt(mean_params['FXJ'].relstd**2 + mean_params['JA'].relstd**2 - 2*np.cov([bootstrap_results['FXJ'], bootstrap_results['JA']])[0,1]/(mean_params['FXJ'].mean * mean_params['JA'].mean))
+    
+    mean_params[prop] = QuantParameter(
+        bootstrap = bootstrap_results['FXJ'] / bootstrap_results['JA'],
+        value = mean_params['FXJ'].median / mean_params['JA'].median,
+        mean = mean_params['FXJ'].mean / mean_params['JA'].mean,
+        median = mean_params['FXJ'].median / mean_params['JA'].median,
+        std = std,
+        truth = truth
+    )
 
-        if debug == True:
+    if debug == True:
+        for prop in ['FXJ', 'FXB', 'JA', 'FXJ_JA']:
             # report results for each parameter
             print()
             print("    "*(tabs), "%s:" % prop)
-            if isinstance(truths, dict):
-                if prop in truths:
-                    print(""*(tabs), "          truth: %0.1E" % mean_params[prop].truth)
-            print("    "*(tabs), "           mean: %0.1E" % mean_params[prop].mean)
-            print("    "*(tabs), "         median: %0.1E" % mean_params[prop].median)
-            print("    "*(tabs), "          stdev: %0.1E (%3.3f%%)" % (mean_params[prop].std, 100. * mean_params[prop].relstd))
-            print("    "*(tabs), "  min-max range: %0.1E - %0.1E" % (np.nanmin(mean_params[prop].bootstrap), np.nanmax(mean_params[prop].bootstrap)))
+            if np.isnan(mean_params[prop].truth) == False:
+                print(""*(tabs), "          truth: %0.2E" % mean_params[prop].truth)
+            print("    "*(tabs), "           mean: %0.2E" % mean_params[prop].mean)
+            print("    "*(tabs), "         median: %0.2E" % mean_params[prop].median)
+            print("    "*(tabs), "          stdev: %0.2E (%3.3f%%)" % (mean_params[prop].std, 100. * mean_params[prop].relstd))
+            y = mean_params[prop].bootstrap.copy()
+            check = np.logical_or(y <= 0, np.isinf(y))
+            y[check] = np.nan
+            print("    "*(tabs), "  min-max range: %0.1E - %0.1E" % (np.nanmin(y), np.nanmax(y)))
+            if np.isnan(mean_params[prop].error) == False:
+                    print("    "*(tabs), "          error: %0.1E (%3.3f%%)" % (mean_params[prop].error, 100. * mean_params[prop].relerror))
+                    
             
     # calculate correlation coefficients
     corr = np.corrcoef([value for key, value in bootstrap_results.items()])
@@ -3295,31 +3510,49 @@ def bootstrap_intensity_fit_script(CR, IR, n_bootstraps=1000, sample_size=1., re
     # convert results into QuantModel instance
     mean_model = QuantModel(
         params = mean_params,
+        corr_matrix = corr,
         cov_matrix = cov_matrix,
         truths = truths,
+        n_bootstraps = n_bootstraps,
+        n_training = np.size(IR),
         training_data = {'CR': CR, 'IR_av': np.nanmean(IR, axis=1), 'IR_std': np.nanstd(IR, axis=1)},
         bootstrap_data = {'CR': CR, 'IR_av': IR_bstrp_av, 'IR_std': IR_bstrp_av}
     )
+    
+    # calculate inherent limits of detection
+    LL_model = detection_limit(mean_model, threshold=3., limit='lower', return_all=True, debug=False)['model']
+    UL_model = detection_limit(mean_model, threshold=3., limit='upper', return_all=True, debug=False)['model']
+    
+    setattr(mean_model, 'LLoD_model', LL_model)
+    setattr(mean_model, 'ULoD_model', UL_model)
+    
+    # calculate inherent limits of quantitation
+    LL_model = detection_limit(mean_model, threshold=10., limit='lower', return_all=True, debug=False)['model']
+    UL_model = detection_limit(mean_model, threshold=10., limit='upper', return_all=True, debug=False)['model']
+    
+    setattr(mean_model, 'LLoQ_model', LL_model)
+    setattr(mean_model, 'ULoQ_model', UL_model)
 
     # plot summary figures for bootstrapping, if required
     if show_plot == True or save_plot == True:
-        plot_quantmodel_summary(mean_model, title=title, x_lims=x_lims, show_plot=show_plot, save_plot=save_plot, tabs=tabs, debug=debug)
+        plot_quantmodel_summary(mean_model, fig_dir=fig_dir, title=title, x_lims=x_lims, plot_covariance=plot_covariance, seed=seed,  plot_linear=plot_linear, show_text=show_text, show_plot=show_plot, save_plot=save_plot, tabs=tabs, debug=debug)
         
     return mean_model
 
-def plot_quantmodel_summary(model, CR=None, IR=None, plot_covariance=False, title="", fig_dir="./figures/", x_lims={'FXJ': (None, None), 'FXB': (None, None), 'JA': (None, None), 'FXJ_JA': (None, None)}, save_plot=False, show_plot=True, debug=False, tabs=0):
+def plot_quantmodel_summary(model, CR=None, IR=None, plot_covariance=False, title="", fig_dir="./figures/", x_lims={'FXJ': (None, None), 'FXB': (None, None), 'JA': (None, None), 'FXJ_JA': (None, None)}, plot_linear=False, seed=None, show_text=True, save_plot=False, show_plot=True, debug=False, tabs=0):
     # function for easy plotting of model summary figure
     
+    #   - tabs:             number of tabs to put before debug messages (str)
+    #   - debug:            if True print all debug messages in viewer (boolean)
+    
     # check model contains necessary parameter data
-    props = ['FXJ', 'FXB', 'JA']
+    props = ['FXJ', 'FXB', 'JA', 'FXJ_JA']
+    n_bootstraps = model.n_bootstraps
     check = [prop for prop in props if hasattr(model, prop) == False]
     if len(check) > 0:
         raise Exception("cannot generate summary figure for model missing data for parameters %s" % ", ".join(check))
-    bootstrap_check = np.all([hasattr(model[prop], 'bootstrap') for prop in props])
-    if bootstrap_check == True:
-        n_bootstraps = np.size(model['FXJ'].bootstrap)
-    else:
-        n_bootstraps = 0
+    if isinstance(x_lims, dict) == False:
+        x_lims = {prop: (None, None) for prop in props}
     
     # check for valid input data
     input_data = {'CR': [], 'IR_av': [], 'IR_std': []}
@@ -3351,9 +3584,6 @@ def plot_quantmodel_summary(model, CR=None, IR=None, plot_covariance=False, titl
         else:
             fig, axs = plt.subplots(1, 4, figsize=(16,4))
         
-        # set up CR range for plotting predicted intensity curves
-        x_temp = np.logspace(np.log10(np.nanmin(input_data['CR'])), np.log10(np.nanmax(input_data['CR'])), 100)
-        
         # determine alpha (transparency) for data
         alpha = float(n_bootstraps)**-0.5
         
@@ -3362,33 +3592,8 @@ def plot_quantmodel_summary(model, CR=None, IR=None, plot_covariance=False, titl
         ax.set_title(title)
         ax.set_xlabel("Concentration Ratio")
         ax.set_ylabel("Intensity Ratio")
-
-        if len(input_data['CR']) > 0:
-            # add input data with errorbars
-            ax.errorbar(input_data['CR'], input_data['IR_av'], yerr=input_data['IR_std'], fmt='none', ecolor='k', capsize=3, zorder=6)
-            ax.scatter(input_data['CR'], input_data['IR_av'], c='k', label='data', zorder=5)
-
-        # add each bootstrap model curve as faint red line
-        if bootstrap_check == True:
-            for i in range(n_bootstraps):
-                params = {}
-                for prop in props:
-                    params[prop] = model[prop].bootstrap[i]
-                temp_model = QuantModel(params=params)
-                curve = intensity_curve(temp_model, x_temp, debug=False)
-                label = '_model'
-                if i == 0:
-                    label = label[1:]
-                ax.plot(x_temp, curve, c='r', label=label, alpha=alpha, zorder=3, linewidth=0.5)
-            
-        # add mean model curve as dashed black line
-        pred, std = predict_intensity(model, x_temp, tabs=tabs+1, debug=False)
-        ax.plot(x_temp, curve, 'k:', label='mean model', zorder=4)
-        if np.count_nonzero(~np.isnan(std)) >= 0.5*np.size(pred):
-            # plot confidence interval if at least 50% of data points have a valid prediction uncertainty
-            ax.fill_between(x_temp, pred-1.96*std, pred+1.96*std, color='k', linewidth=0., alpha=0.2, label='95% CI')
         
-        # finish ax
+        # determine x,y axis limits
         neg_check = input_data['IR_av'] > 0
         x_min = 10**np.floor(np.log10(0.9*np.nanmin(input_data['CR'])))
         x_max = 10**np.ceil(np.log10(1.1*np.nanmax(input_data['CR'])))
@@ -3398,11 +3603,43 @@ def plot_quantmodel_summary(model, CR=None, IR=None, plot_covariance=False, titl
         y_max = 10**np.ceil(np.log10(1.1*np.nanmax(input_data['IR_av'][neg_check])))
         ax.set_yscale('log')
         ax.set_ylim(y_min, y_max)
-        ax.legend()
+
+        if len(input_data['CR']) > 0:
+            # add input data with errorbars
+            ax.errorbar(input_data['CR'], input_data['IR_av'], yerr=input_data['IR_std'], fmt='none', ecolor='k', capsize=3, zorder=6)
+            ax.scatter(input_data['CR'], input_data['IR_av'], c='k', label='data', zorder=5)
+            
+        # add mean model curve as dashed black line, confidence interval band as red region
+        x_temp = np.logspace(np.log10(x_min), np.log10(x_max), 100)
+        pred, upper_conf, lower_conf = predict_intensity(model, x_temp, percentiles=(2.5, 97.5), seed=seed, tabs=tabs+1, debug=False)
+        ax.plot(x_temp, pred, 'r', label='mean model', zorder=4)
+        ax.fill_between(x_temp, lower_conf, upper_conf, color='r', linewidth=0., alpha=0.2, label='95% CI')
+        
+        if plot_linear == True:
+            ax.plot(x_temp, model['FXJ'].median * x_temp, 'r:', label='linear')
+        
+        # finish ax
+        ax.legend(loc='upper left')
         
         # plot each parameter distribution in its own ax
         for ax, prop in zip(axs.flat[1:4], ['FXJ', 'FXB', 'JA']):
-            x_min, x_max = x_lims[prop]
+            
+            # get x_lims
+            check = False
+            if isinstance(x_lims, dict):
+                if prop in x_lims:
+                    if len(x_lims[prop]) == 2:
+                        x_min, x_max = x_lims[prop]
+                        check = True
+            if check == False:
+                # no suitable ax limits defined for this property, get best results based on distribution of values
+                mean = model[prop].mean
+                std = model[prop].std
+                if model[prop].mean == 0. and model[prop].std == 0.:
+                    x_min, x_max = (-0.001, 0.001)
+                else:
+                    x_min = np.amin([model[prop].mean - 5 * model[prop].std, 0.99*model[prop].mean])
+                    x_max = np.amax([model[prop].mean + 5 * model[prop].std, 1.01*model[prop].mean])
             
             # initialise ax
             ax.set_title("%s Distribution" % prop)
@@ -3410,47 +3647,47 @@ def plot_quantmodel_summary(model, CR=None, IR=None, plot_covariance=False, titl
             
             # plot mean value
             ax.axvline(model[prop].mean, c='k', linestyle=':', label="mean")
+            ax.axvline(model[prop].median, c='k', linestyle='--', label="median")
             
             # set up CR range for plotting predicted intensity curves
-            x_temp = np.linspace(x_min, x_max, 100)
+            x_temp = np.logspace(np.log10(x_min), np.log10(x_max), 100)
             
-            if bootstrap_check == True:
-                # plot histogram
-                hist, bins, patches = ax.hist(model[prop].bootstrap, range=(x_min, x_max), bins=50, color='steelblue')
+            # plot histogram
+            hist, bins, patches = ax.hist(model[prop].bootstrap, range=(x_min, x_max), bins=50, color='steelblue')
                 
-                # add text for distribution properties 
-                text = [
-                    "Mean: %0.1E" % model[prop].mean,
-                    "SD: %0.1E" % model[prop].std,
-                    "RelSD: %0.1E" % model[prop].relstd
-                ]
+            # add text for distribution properties 
+            text = [
+                "Median: %0.1E" % model[prop].median,
+                " 1st %%: %0.1E" % model[prop].pc1,
+                "99th %%: %0.1E" % model[prop].pc99
+            ]
                 
-                if np.all(~np.isnan(hist)) and model[prop].std > 0 and bins[-1]-bins[0] > 0:
-                    # fit distribution with normal distribution
-                    params = lmfit.Parameters()
-                    params.add('gradient', value=0., vary=False)
-                    params.add('intercept', value=0., vary=False)
-                    params.add('center_%s' % 0, value=model[prop].mean)
-                    params.add('amplitude_%s' % 0, value=np.nanmax(hist))
-                    params.add('sigma_%s' % 0, value=model[prop].std)
-                    fit = lmfit.minimize(multiG_fit, params, args=((bins[:-1]+bins[1:])/2, hist, [0]))
-                    # plot normal distribution
-                    curve = multiG_curve(fit.params, x_temp, [0])
-                    ax.plot(x_temp, curve, 'k')
-            else:
-                # no bootstrap data to plot, just report parameter value
-                text = ["Value: %0.1E" % model[prop].value, "SD: N/A", "RelSD: N/A"]
+            if np.all(~np.isnan(hist)) and model[prop].std > 0 and bins[-1]-bins[0] > 0:
+                # plot normal distribution based on mean, std
+                params = lmfit.Parameters()
+                params.add('gradient', value=0., vary=False)
+                params.add('intercept', value=0., vary=False)
+                params.add('center_%s' % 0, value=model[prop].mean, vary=False)
+                params.add('amplitude_%s' % 0, value=np.nanmax(hist))
+                params.add('sigma_%s' % 0, value=model[prop].std, vary=False)
+                # fit amplitude to best match hist data
+                fit = lmfit.minimize(multiG_fit, params, args=((bins[1:]+bins[:-1])/2, hist, [0]))
+                # plot normal distribution
+                x_temp = np.logspace(np.log10(x_min), np.log10(x_max), 100)
+                curve = multiG_curve(fit.params, x_temp, [0])
+                ax.plot(x_temp, curve, 'k')
                 
             # add truth if available
             if np.isnan(model[prop].truth) == False:
-                ax.axvline(truths[prop], c='k', linestyle='--', label="truth")
+                ax.axvline(model[prop].truth, c='k', linestyle='-', label="truth")
                 if np.isnan(model[prop].error) == False:
                     text.append("")
                     text.append("err: %0.1f$\sigma$" % (np.abs(model[prop].error)/model[prop].std))
                 ax.legend(loc='upper left')
             
             # add text to figure
-            ax.text(0.97, 0.97, "\n".join(text), ha='right', va='top', transform=ax.transAxes)
+            if show_text == True:
+                ax.text(0.97, 0.97, "\n".join(text), ha='right', va='top', transform=ax.transAxes)
             
             # finish ax
             ax.set_xlim(x_min, x_max)
@@ -3459,6 +3696,7 @@ def plot_quantmodel_summary(model, CR=None, IR=None, plot_covariance=False, titl
         # add covariance plots if needed
 
         if plot_covariance == True and hasattr(model, 'cov_matrix'):
+            cov_matrix = model['cov_matrix']
             # get all possible pairs of parameters
             pairs = combinations(range(3), 2)
             count = 0
@@ -3478,16 +3716,82 @@ def plot_quantmodel_summary(model, CR=None, IR=None, plot_covariance=False, titl
                 
                 # plot 2 parameters as 2D scatter
                 ax.set_title("%s v %s" % (y_prop, x_prop))
-                ax.scatter(model[x_prop].bootstrap, model[y_prop].bootstrap, c='steelblue', linewidth=0.,
-                        alpha=float(n_bootstraps)**-0.25)
+                ax.scatter(model[x_prop].bootstrap, model[y_prop].bootstrap, c='steelblue', linewidth=0., alpha=float(n_bootstraps)**-0.25)
                 ax.axvline(model[x_prop].mean, c='k', linestyle=':')
                 ax.axhline(model[y_prop].mean, c='k', linestyle=':')
                 ax.text(0.05, 0.95, "P=%0.2f" % pcorr_coeff, ha='left', va='top', transform=ax.transAxes)
+                ax.set_xlabel(x_prop)
+                ax.set_ylabel(y_prop)
                 
                 # finish ax
                 ax.set_xlim(x_min, x_max)
                 ax.set_ylim(y_min, y_max)
                 count += 1
+                
+            # plot limits of detection, quantitation in spare ax
+            ax = axs.flat[4]
+            
+            ax.set_xlabel("Concentration Ratio")
+            ax.set_ylabel("Intensity Ratio")
+            neg_check = input_data['IR_av'] > 0
+            x_min = 10**np.floor(np.log10(0.9*np.nanmin(input_data['CR'])))
+            x_max = 10**np.ceil(np.log10(1.1*np.nanmax(input_data['CR'])))
+            ax.set_xscale('log')
+            ax.set_xlim(x_min, x_max)
+            y_min = 10**np.floor(np.log10(0.9*np.nanmin(input_data['IR_av'][neg_check])))
+            y_max = 10**np.ceil(np.log10(1.1*np.nanmax(input_data['IR_av'][neg_check])))
+            ax.set_yscale('log')
+            ax.set_ylim(y_min, y_max)
+
+            if len(input_data['CR']) > 0:
+                # add input data with errorbars
+                ax.errorbar(input_data['CR'], input_data['IR_av'], yerr=input_data['IR_std'], fmt='none', ecolor='k', capsize=3, zorder=6)
+                ax.scatter(input_data['CR'], input_data['IR_av'], c='k', label='data', zorder=5)
+
+            # add mean model curve, confidence interval band
+            x_temp = np.logspace(np.log10(x_min), np.log10(x_max), 100)
+            pred, upper_conf, lower_conf = predict_intensity(model, x_temp, percentiles=(2.5, 97.5), seed=seed, tabs=tabs+1, debug=False)
+            ax.plot(x_temp, pred, 'r', label='mean model', zorder=4)
+            ax.fill_between(x_temp, lower_conf, upper_conf, color='r', linewidth=0., alpha=0.2, label='95% CI')
+
+            # plot limits of detection
+            LL = 0
+            UL = 0
+            print("    LLoD: %0.1E" % LL)
+            print("    ULoD: %0.1E" % UL)
+            if LL > 0 and ~np.isinf(LL):
+                ax.fill(
+                        [x_min, x_min, LL, LL],
+                        [y_min, intensity_curve(model, LL), intensity_curve(model, LL), y_min],
+                        color='k', alpha=0.1, linewidth=0., hatch='////'
+                )
+            if UL > 0 and ~np.isinf(UL):
+                ax.fill(
+                        [x_min, x_min, x_max, x_max, UL, UL],
+                        [intensity_curve(model, UL), y_max, y_max, y_min, y_min, intensity_curve(model, UL)],
+                        color='k', alpha=0.1, linewidth=0., hatch='////'
+                )
+                    
+            # plot limits of quantitation
+            LL = 0
+            UL = 0
+            print("    LLoQ: %0.1E" % LL)
+            print("    ULoQ: %0.1E" % UL)
+            if LL > 0 and ~np.isinf(LL):
+                ax.fill(
+                        [x_min, x_min, LL, LL],
+                        [y_min, intensity_curve(model, LL), intensity_curve(model, LL), y_min],
+                        color='k', alpha=0.1, linewidth=0.,
+                )
+            if UL > 0 and ~np.isinf(UL):
+                ax.fill(
+                        [x_min, x_min, x_max, x_max, UL, UL],
+                        [intensity_curve(model, UL), y_max, y_max, y_min, y_min, intensity_curve(model, UL)],
+                        color='k', alpha=0.1, linewidth=0.,
+                )
+                
+            # finish ax
+            ax.legend(loc='upper left')
         
         # ==================================================
         # finish figure
@@ -3495,6 +3799,7 @@ def plot_quantmodel_summary(model, CR=None, IR=None, plot_covariance=False, titl
         plt.tight_layout()
         if save_plot == True:
             plt.savefig("%s%s_model-summary.png" % (fig_dir, title), dpi=300)
+            plt.savefig("%s%s_model-summary.svg" % (fig_dir, title), dpi=300)
         if show_plot == True:
             plt.show()
         else:
@@ -3506,25 +3811,632 @@ def plot_quantmodel_summary(model, CR=None, IR=None, plot_covariance=False, titl
 
 # functions for predicting values using a trained model
 
-def predict_intensity(model, CR, CR_err=None, params=None, tabs=0, debug=False):
-    # function for predicting intensity ratio for a given concentration ratio
+def predict_intensity(model, CR_in, CR_std=0., percentiles=(16,84), seed=None, normal_samples=1000, return_all=False, clean_output=True, tabs=0, debug=False):
+    # function for bootstrapped prediction of concentration ratio distribution for a given input intensity ratio
+    # argument summary:
+    #   - model:        QuantModel object containing all bootstrapped models
+    #   - IR_in:        input intensity ratio (float, or 1D array of floats, or 2D array of floats if 2nd dim is)
+    #   - IR_std:       input uncertainty in intensity ratio (float, or array of floats)
+    #   - percentiles   percentiles to evaluate if return_all == False (tuple of 2 values between 1-99)
+    #   - return_all    return entire distribution, or just summary values? (boolean)
+    #   - rng_seed      seed for random sampling of normally distributed uncertainty (when IR_std > 0)
+    # if return_all == True, this function returns the following:
+    #   - if CR_in is a float, returns a 1D (N) array of predicted intensity ratios from N models
+    #   - if CR_in is a 1D (M) array of M datapoints, returns a 2D (M,N) array of predicted intensity ratios
+    #   - if CR_in is a 2D (M,P) array of P observations of M datapoints, returns a 2D (M,N*P) array of predicted intensity ratios
+    # if return_all == False, this function returns the following:
+    #   - if CR_in is a float, returns 3 single values for median, lower percentile, upper percentile
+    #   - if CR_in is a 1D (M) array of M datapoints, returns 3 1D (M) arrays for median, lower, upper
+    #   - if CR_in is a 2D (M,P) array of P observations of M datapoints, returns 3 1D (M) arrays for median, lower, upper
     
-    # run model functions
-    fit_curve = intensity_curve(model, CR, debug=debug)
-    error = intensity_error(model, CR, CR_err, debug=debug)
+    # clean up input data, determine ndim
+    if type(seed) == float:
+        seed = int(seed)
+    normal_samples = int(normal_samples)
+    if len(percentiles) != 2:
+        raise Exception("predict_concentration() must receive exactly two percentile values!")
+    elif percentiles[0] > 100 or percentiles[1] > 100:
+        raise Exception("predict_concentration() must receive percentile values between 0 and 100!")
+    elif percentiles[0] < 0 or percentiles[1] < 0:
+        raise Exception("predict_concentration() must receive percentile values between 0 and 100!")
+    if isinstance(CR_in, (int, float, float, np.float64)):
+        # received single scalar
+        CR = np.asarray([CR_in], dtype=np.float64)
+        ndim = 1
+        ndshape = (1)
+        ndsize = 1
+    elif isinstance(CR_in, (list, np.ndarray)):
+        # received list or N-dimensional array, convert and expand to ndim+1
+        CR = np.asarray(CR_in, dtype=np.float64)
+        ndim = CR.ndim
+        ndshape = np.shape(CR)
+        ndsize = np.size(CR, axis=0)
+    else:
+        raise Exception("predict_concentration() must receive a float or array of floats!")
+        
+    if debug == True:
+        print("input CR:", np.shape(CR_in))
+        print("clean CR:", np.shape(CR))
     
-    return fit_curve, error
+    # set up random number generator for uncertainty estimation
+    rng = np.random.default_rng(seed)
     
-def predict_concentration(model, IR, IR_err=None, tabs=0, debug=False):
-    # function for predicting concentration ratio for a given intensity ratio 
+    # handle IR uncertainty
+    std_check = False
+    if np.all(CR_std == None) or np.all(CR_std == 0):
+        # no uncertainty, ignore
+        pass
+    elif isinstance(CR_std, (int, float, np.float64)):
+        # received a single uncertainty value, generate normally distributed values
+        CR = np.repeat(np.expand_dims(CR, axis=-1), normal_samples, axis=-1)
+        CR = rng.normal(CR, CR_std, np.shape(CR))
+        std_check = True
+    elif isinstance(CR_std, (list, np.ndarray)):
+        # received multiple uncertainty values, generate normally distributed values for each
+        if np.shape(CR_std) == np.shape(CR):
+            CR = np.repeat(np.expand_dims(CR, axis=-1), normal_samples, axis=-1)
+            CR = rng.normal(CR, CR_std, np.shape(CR))
+            std_check = True
+        else:
+            raise Exception("predict_concentration() IR_std array shape must match IR_in shape!")
+    else:
+        raise Exception("predict_concentration() IR_std argument must be None, float or array of floats!")
     
-    # run model functions
-    fit_curve = concentration_curve(model, IR, debug=debug)
-    error = concentration_error(model, IR, IR_err, debug=debug)
+    # check for infinities
+    inf_check = np.isinf(CR)
     
-    return fit_curve, error
+    # add extra dim to IR array for broadcasting with params
+    CR = np.expand_dims(CR, axis=-1)
+    
+    if debug == True:
+        print("final CR:", np.shape(CR))
+        print("    median: %0.1E" % np.nanmedian(CR))
+    
+    # generate bootstrapped parameter matrix with extra dims to broadcast with IR
+    if ndim == 0:
+        params = {prop: model[prop].bootstrap for prop in ['FXJ', 'FXB', 'JA']}
+    else:
+        params = {prop: np.expand_dims(model[prop].bootstrap, axis=tuple(range(CR.ndim-1))) for prop in ['FXJ', 'FXB', 'JA']}
+    
+    # predict concentration ratio for each input IR (with uncertainty) for each model
+    IR = (params["FXJ"] * CR + params["FXB"]) / (params["JA"] * CR + 1)
+    
+    # handle infinities
+    if np.any(inf_check) == True:
+        IR[inf_check] = model['FXJ'].bootstrap / model['JA'].bootstrap
+    
+    if debug == True:
+        print("  params:", np.shape(params['FXJ']))
+        print("pred. IR:", np.shape(IR))
+    
+    
+    if IR.ndim > 2:
+        # flatten uncertainty distributions together
+        IR = np.reshape(IR, (ndsize, -1))
+        
+    if debug == True:
+        print("final IR:", np.shape(IR))
+        print("nan check: %3.2f%%" % (100.*np.count_nonzero(np.isnan(IR))/np.size(IR)))
+        print("inf check: %3.2f%%" % (100.*np.count_nonzero(np.isinf(IR))/np.size(IR)))
+        print(" <0 check: %3.2f%%" % (100.*np.count_nonzero(IR < 0)/np.size(IR)))
+        
+    # clean up output
+    if clean_output == True:
+        check = np.logical_or(IR < 0, np.isinf(IR))
+        IR[check] = np.nan
+        
+    if return_all == True:
+        # return predicted CRs
+        return IR
+    else:
+        # return only median, low and high percentiles for each input IR
+        median = np.nanmedian(IR, axis=-1)
+        pc_low = np.nanpercentile(IR, percentiles[0], axis=-1)
+        pc_high = np.nanpercentile(IR, percentiles[1], axis=-1)
+        return median, pc_low, pc_high
 
-def detection_limit(model, noise=0., I1=None, I2=None, threshold=5., limit='lower', return_separate_values=False, debug=False):
+def predict_concentration(model, IR_in, IR_std=0., percentiles=(16,84), seed=None, normal_samples=1000, return_all=False, clean_output=True, tabs=0, debug=False):
+    # function for bootstrapped prediction of concentration ratio distribution for a given input intensity ratio
+    # argument summary:
+    #   - model:            QuantModel object containing all bootstrapped models
+    #   - IR_in:            input intensity ratio (float, or array of floats)
+    #   - IR_std:           input uncertainty in intensity ratio (float, or array of floats)
+    #   - percentiles       percentiles to evaluate if return_all == False (tuple of 2 values between 1-99)
+    #   - seed              seed for random sampling of normally distributed uncertainty (when IR_std > 0)
+    #   - normal_samples    number of samples to draw from normal distribution when approximating noisy data (int)
+    #   - return_all        if True return entire distribution, if False return just summary values (boolean)
+    #   - tabs:             number of tabs to put before debug messages (str)
+    #   - debug:            if True print all debug messages in viewer (boolean)
+    # if return_all == True, this function returns the following:
+    #   - if IR_in is a float, returns a 1D (N) array of predicted concentration ratios from N models
+    #   - if IR_in is a 1D array, returns a 2D (M,N) array of concentration ratios for N models of M data points
+    #   - if IR_in is a 2D array, returns a 2D (M,N*P) array of concentration ratios for N models of M data points (with P observations)
+    # if return_all == False, this function returns the following:
+    #   - if IR_in is a float, returns 3 single values for median, lower percentile, upper percentile of predicted concentration ratios
+    #   - if IR_in is a 1D array, returns 3 1D (M) arrays for median, lower percentile, upper percentile for M data points
+    #   - if IR_in is a 2D array, returns 3 1D (M) arrays for median, lower percentile, upper percentile for M data points
+    
+    # clean up input data, determine ndim
+    if type(seed) == float:
+        seed = int(seed)
+    normal_samples = int(normal_samples)
+    if len(percentiles) != 2:
+        raise Exception("predict_concentration() must receive exactly two percentile values!")
+    elif percentiles[0] > 100 or percentiles[1] > 100:
+        raise Exception("predict_concentration() must receive percentile values between 0 and 100!")
+    elif percentiles[0] < 0 or percentiles[1] < 0:
+        raise Exception("predict_concentration() must receive percentile values between 0 and 100!")
+    if isinstance(IR_in, (int, float, float, np.float64)):
+        # received single scalar
+        IR = np.asarray([IR_in], dtype=np.float64)
+        ndim = 1
+        ndshape = (1)
+        ndsize = 1
+    elif isinstance(IR_in, (list, np.ndarray)):
+        # received list or N-dimensional array, convert and expand to ndim+1
+        IR = np.asarray(IR_in, dtype=np.float64)
+        ndim = IR.ndim
+        ndshape = np.shape(IR)
+        ndsize = np.size(IR, axis=0)
+    else:
+        raise Exception("predict_concentration() must receive a float or array of floats!")
+    
+    # set up random number generator for uncertainty estimation
+    rng = np.random.default_rng(seed)
+    
+    # handle IR uncertainty
+    std_check = False
+    if np.all(IR_std == None) or np.all(IR_std == 0):
+        # no uncertainty, ignore
+        pass
+    elif isinstance(IR_std, (int, float, np.float64)):
+        # received a single uncertainty value, generate normally distributed values
+        IR = np.repeat(np.expand_dims(IR, axis=-1), normal_samples, axis=-1)
+        IR = rng.normal(IR, IR_std, np.shape(IR))
+        std_check = True
+    elif isinstance(IR_std, (list, np.ndarray)):
+        # received multiple uncertainty values, generate normally distributed values for each
+        if np.shape(IR_std) == np.shape(IR):
+            IR = np.repeat(np.expand_dims(IR, axis=-1), normal_samples, axis=-1)
+            IR = rng.normal(IR, IR_std, np.shape(IR))
+            std_check = True
+        else:
+            raise Exception("predict_concentration() IR_std array shape must match IR_in shape!")
+    else:
+        raise Exception("predict_concentration() IR_std argument must be None, float or array of floats!")
+    
+    # add extra dim to IR array for broadcasting with params
+    IR = np.expand_dims(IR, axis=-1)
+    
+    # generate bootstrapped parameter matrix with extra dims to broadcast with IR
+    if ndim == 0:
+        params = {prop: model[prop].bootstrap for prop in ['FXJ', 'FXB', 'JA']}
+    else:
+        params = {prop: np.expand_dims(model[prop].bootstrap, axis=tuple(range(IR.ndim-1))) for prop in ['FXJ', 'FXB', 'JA']}
+    
+    # predict concentration ratio for each input IR (with uncertainty) for each model
+    CR = (IR - params["FXB"]) / (params["FXJ"] - params["JA"] * IR)
+    
+    if CR.ndim > 2:
+        # flatten uncertainty distributions together
+        CR = np.reshape(CR, (ndsize, -1))
+        
+    if debug == True:
+        print("final CR:", np.shape(CR))
+        print("nan check: %3.2f%%" % (100.*np.count_nonzero(np.isnan(CR))/np.size(CR)))
+        print("inf check: %3.2f%%" % (100.*np.count_nonzero(np.isinf(CR))/np.size(CR)))
+        print(" <0 check: %3.2f%%" % (100.*np.count_nonzero(CR < 0)/np.size(CR)))
+        
+    # clean up output
+    if clean_output == True:
+        check = np.logical_or(CR < 0, np.isinf(CR))
+        CR[check] = np.nan
+        
+    if return_all == True:
+        # return predicted CRs
+        return CR
+    else:
+        # return only median, low and high percentiles for each input IR
+        median = np.nanmedian(CR, axis=-1)
+        pc_low = np.nanpercentile(CR, percentiles[0], axis=-1)
+        pc_high = np.nanpercentile(CR, percentiles[1], axis=-1)
+        return median, pc_low, pc_high
+    
+def predict_intensity_noise(model, CR, CR_std=0., I1=0., I2=0., noise=0., percentiles=(16,84), n_samples=1000, seed=None, return_all=False):
+    # function for adding noise to an intensity prediction from the model, using a reference peak intensity and known background noise
+    rng = np.random.default_rng(seed)
+    
+    # predict standard IR for CR, CR_std using model
+    IR = predict_intensity(model, CR, CR_std, return_all=True)
+    ndshape = np.shape(IR)
+    
+    if I1 > 0 and noise > 0:
+        # add noise based on relative intensity of I1
+        temp_I2 = rng.normal(I1 / IR[...,np.newaxis], noise, ndshape+(n_samples,))
+        temp_I1 = rng.normal(I1, noise, ndshape+(1000,))
+        IR = np.reshape(temp_I1 / temp_I2, (np.size(CR), -1))
+    elif I2 > 0 and noise > 0:
+        # add noise based on relative intensity of I2
+        temp_I1 = rng.normal(I2 * IR[...,np.newaxis], noise, ndshape+(n_samples,))
+        temp_I2 = rng.normal(I2, noise, ndshape+(1000,))
+        IR = np.reshape(temp_I1 / temp_I2, (np.size(CR), -1))
+    
+    if return_all == True:
+        return IR
+    else:
+        if isinstance(CR, (int, float, np.float64)) == True:
+            # return scalars, not single-element arrays
+            median = np.nanmedian(IR)
+            pc_low = np.nanpercentile(IR, percentiles[0])
+            pc_high = np.nanpercentile(IR, percentiles[1])
+        else:
+            median = np.nanmedian(IR, axis=-1)
+            pc_low = np.nanpercentile(IR, percentiles[0], axis=-1)
+            pc_high = np.nanpercentile(IR, percentiles[1], axis=-1)
+        return median, pc_low, pc_high
+
+def get_detection_limit(model, limit='lower', I1=0., I2=0., noise=0., threshold=1, seed=None, return_all=False, show_plot=False, save_plot=False, title="", fig_dir="./figures/", tabs=0, debug=False):
+    # function for determining the limit of detection (upper or lower) for a given model, evaluated for both intrinsic uncertainty (model) and measurement error (noise)
+    # argument summary:
+    #   - model:            QuantModel object containing all bootstrapped models
+    #   - limit:            which limit to determine, either 'lower' or 'upper' (str)
+    #   - I1:               intensity of peak I1, required to evaluate upper noise limit (float)
+    #   - I2:               intensity of peak I2, required to evaluate lower noise limit (float)
+    #   - noise:            st.dev. of background noise, required to evaluate either noise limit (float)
+    #   - threshold:        percentile to evaluate
+    #   - return_all:       if True return both limits, if False return most conservative limit (boolean)
+    #   - show_plot:        if True the summary figure will be shown in viewer (boolean)
+    #   - save_plot:        if True the summary figure will be saved to file (boolean)
+    #   - title:            figure title to put at beginning of filename (str)
+    #   - fig_dir:          directory to save figure file in (str)
+    #   - tabs:             number of tabs to put before debug messages (str)
+    #   - debug:            if True print all debug messages in viewer (boolean)
+    
+    
+    # clean up input
+    limit = limit.lower()
+    if limit not in ['upper', 'lower']:
+        raise Exception("get_detection_limit() limit argument must be either 'upper' or 'lower'!")
+        
+    # set up random number generator
+    rng = np.random.default_rng(seed)
+    
+    # determine basic IR values
+    if limit == 'upper':
+        percentiles = (threshold, 100-threshold)
+        blank_CR = np.inf
+        blank_model_median, blank_model_lower, blank_model_upper = predict_intensity(model, blank_CR, percentiles=percentiles, return_all=False)
+        model_target = blank_model_lower
+        # handle noise
+        temp_I1 = I1
+        temp_I2 = 0.
+        if I1 > 0 and noise > 0:
+            blank_noise_median, blank_noise_lower, blank_noise_upper = predict_intensity_noise(model, blank_CR, I1=temp_I1, I2=temp_I2, noise=noise, seed=seed, percentiles=percentiles, return_all=False)
+            noise_target = blank_noise_lower
+        else:
+            noise_target = np.inf
+    else:
+        percentiles = (threshold, 100-threshold)
+        blank_CR = 0.
+        blank_model_median, blank_model_lower, blank_model_upper = predict_intensity(model, blank_CR, percentiles=percentiles, return_all=False)
+        model_target = blank_model_upper
+        temp_I1 = 0.
+        temp_I2 = I2
+        if I2 > 0 and noise > 0:
+            blank_noise_median, blank_noise_lower, blank_noise_upper = predict_intensity_noise(model, blank_CR, I1=temp_I1, I2=temp_I2, noise=noise, seed=seed, percentiles=percentiles, return_all=False)
+            noise_target = blank_noise_upper
+        else:
+            noise_target = 0.
+        
+    if isinstance(model_target, np.ndarray):
+        model_target = model_target[0]
+    if isinstance(noise_target, np.ndarray):
+        noise_target = noise_target[0]
+                
+    if debug == True:
+        print()
+        print("    "*(tabs), "getting P=%s thresholds..." % threshold)
+        print("    "*(tabs), "Estimated %s IR thresholds:" % limit.title())
+        print("    "*(tabs+1), "model: %0.1E" % model_target)
+        print("    "*(tabs+1), "noise: %0.1E" % noise_target)
+            
+    # for model_target, evaluate model-only distributions and get CR where median IR equals target
+    if model_target == 0.:
+        LD_model = np.nan
+    else:
+        CR_target = concentration_curve(model, model_target)
+        CR_min = 10**np.floor(np.log10(0.5*CR_target))
+        CR_max = 10**np.ceil(np.log10(2*CR_target))
+        model_CR_range = np.logspace(np.log10(CR_min), np.log10(CR_max), 100)
+        model_medians, model_lower, model_upper = predict_intensity(model, model_CR_range, percentiles=percentiles, return_all=False)
+        LD_model = np.interp(model_target, model_medians, model_CR_range)
+        
+    if debug == True:
+        print("    "*(tabs), "evaluating model limit...")
+        print("    "*(tabs+1), "CR range: %0.1E - %0.1E" % (CR_min, CR_max))
+        print("    "*(tabs+1), "IR range: %0.1E - %0.1E" % (model_medians[0], model_medians[-1]))
+        print("    "*(tabs+1), "   model: %0.1E" % LD_model)
+        if LD_model <= CR_min or LD_model >= CR_max:
+            print("    "*(tabs+2), "caution! predicted model limit is outside evaluated range!")
+    
+    # for noise_target, evaluate model+noise distributions and get CR where median IR equals target
+    if noise_target == 0.:
+        LD_noise = np.nan
+    else:
+        CR_target = concentration_curve(model, noise_target)
+        CR_min = 10**np.floor(np.log10(0.5*CR_target))
+        CR_max = 10**np.ceil(np.log10(2*CR_target))
+        noise_CR_range = np.logspace(np.log10(CR_min), np.log10(CR_max), 100)
+        noise_medians, noise_lower, noise_upper = predict_intensity_noise(model, noise_CR_range, I1=temp_I1, I2=temp_I2, noise=noise, seed=seed, percentiles=percentiles, return_all=False)
+        LD_noise = np.interp(noise_target, noise_medians, noise_CR_range)
+    
+    if debug == True:
+        print("    "*(tabs), "evaluating noise limit...")
+        print("    "*(tabs+1), "CR range: %0.1E - %0.1E" % (CR_min, CR_max))
+        print("    "*(tabs+1), "IR range: %0.1E - %0.1E" % (noise_medians[0], noise_medians[-1]))
+        print("    "*(tabs+1), "   noise: %0.1E" % LD_noise)
+        if LD_noise <= CR_min or LD_noise >= CR_max:
+            print("    "*(tabs+2), "caution! predicted noise limit is outside evaluated range!")
+    
+    # clean up output
+    if LD_model < 0:
+        LD_model = np.nan
+    if LD_noise < 0:
+        LD_noise = np.nan
+    
+    if limit == 'upper':
+        LD_overall = np.nanmin([LD_model, LD_noise])
+    else:
+        LD_overall = np.nanmax([LD_model, LD_noise])
+    
+    # plot results if required
+    if show_plot == True or save_plot == True:
+        # set up figure
+        plt.figure(figsize=(6,6))
+        ax1 = plt.subplot(111)
+        ax1.set_title("%s Detect. Limits" % (limit.title()))
+        
+        # plot FXB or FXJ/JA
+        ax1.axhline(blank_model_median, c='k', linestyle='-', label='limit')
+        ax1.axhspan(blank_model_lower, blank_model_upper, facecolor='k', edgecolor='k', linewidth=0., alpha=0.2, hatch='////')
+        if noise > 0:
+            ax1.axhspan(blank_noise_lower, blank_noise_upper, facecolor='k', linewidth=0., alpha=0.2)
+        
+        if debug == True:
+            print("    "*(tabs), "CR range for plotting: %0.1E - %0.1E" % (CR_min, CR_max))
+        
+        # plot model-only data
+        ax1.plot(model_CR_range, model_medians, c='r', label='model')
+        ax1.fill_between(model_CR_range, model_lower, model_upper, facecolor='r', edgecolor='r', linewidth=0., alpha=0.2, hatch='////', label='model %s-%s%%' % (threshold, 100-threshold))
+        
+        # plot model-driven limits
+        ax1.axhline(model_target, c='r', linestyle=':', label='LD (model)')
+        ax1.axvline(LD_model, c='r', linestyle=':')
+        
+        if np.isnan(LD_noise) == False:
+            # plot model+noise data
+            ax1.plot(noise_CR_range, noise_medians, c='b', label='noise')
+            ax1.fill_between(noise_CR_range, noise_lower, noise_upper, facecolor='b', linewidth=0., alpha=0.2, label='noise %s-%s%%' % (threshold, 100-threshold))
+            
+            # plot noise-driven limits
+            ax1.axhline(noise_target, c='b', linestyle=':', label='LD (noise)')
+            ax1.axvline(LD_noise, c='b', linestyle=':')
+        
+        # finish figure
+        ax1.set_xscale('log')
+        ax1.set_yscale('log')
+        ax1.set_xlabel("Theor. CR")
+        ax1.set_ylabel("Theor. IR")
+        if limit == 'upper':
+            ax1.legend(loc='lower right')
+        else:
+            ax1.legend(loc='upper left')
+        plt.tight_layout()
+        if save_plot == True:
+            plt.savefig("%s%s_%s-detection-limits.png" % (fig_dir, title, limit), dpi=300)
+        if show_plot == True:
+            plt.show()
+        else:
+            plt.close()
+    
+    # return results
+    if return_all == True:
+        return {'model': LD_model, 'noise': LD_noise, 'overall': LD_overall}
+    else:
+        return LD_overall
+    
+def get_quantification_limit(model, limit='lower', I1=0., I2=0., noise=0., threshold=1, seed=None, return_all=False, show_plot=False, save_plot=False, title="", fig_dir="./figures/", tabs=0, debug=False):
+    # function for determining the limit of quantification (upper or lower) for a given model, evaluated for both intrinsic uncertainty (model) and measurement error (noise)
+    # argument summary:
+    #   - model:            QuantModel object containing all bootstrapped models
+    #   - limit:            which limit to determine, either 'lower' or 'upper' (str)
+    #   - I1:               intensity of peak I1, required to evaluate upper noise limit (float)
+    #   - I2:               intensity of peak I2, required to evaluate lower noise limit (float)
+    #   - noise:            st.dev. of background noise, required to evaluate either noise limit (float)
+    #   - threshold:        percentile to evaluate
+    #   - return_all:       if True return both limits, if False return most conservative limit (boolean)
+    #   - show_plot:        if True the summary figure will be shown in viewer (boolean)
+    #   - save_plot:        if True the summary figure will be saved to file (boolean)
+    #   - title:            figure title to put at beginning of filename (str)
+    #   - fig_dir:          directory to save figure file in (str)
+    #   - tabs:             number of tabs to put before debug messages (str)
+    #   - debug:            if True print all debug messages in viewer (boolean)
+    
+    
+    # clean up input
+    limit = limit.lower()
+    if limit not in ['upper', 'lower']:
+        raise Exception("get_quantification_limit() limit argument must be either 'upper' or 'lower'!")
+        
+    # set up random number generator
+    rng = np.random.default_rng(seed)
+    
+    # determine basic IR values
+    if limit == 'upper':
+        percentiles = (threshold, 100-threshold)
+        blank_CR = np.inf
+        blank_model_median, blank_model_lower, blank_model_upper = predict_intensity(model, blank_CR, percentiles=percentiles, return_all=False)
+        model_target = blank_model_lower
+        # handle noise
+        temp_I1 = I1
+        temp_I2 = 0.
+        if I1 > 0 and noise > 0:
+            blank_noise_median, blank_noise_lower, blank_noise_upper = predict_intensity_noise(model, blank_CR, I1=temp_I1, I2=temp_I2, noise=noise, seed=seed, percentiles=percentiles, return_all=False)
+            noise_target = blank_noise_lower
+        else:
+            noise_target = np.inf
+    else:
+        percentiles = (threshold, 100-threshold)
+        blank_CR = 0.
+        blank_model_median, blank_model_lower, blank_model_upper = predict_intensity(model, blank_CR, percentiles=percentiles, return_all=False)
+        model_target = blank_model_upper
+        temp_I1 = 0.
+        temp_I2 = I2
+        if I2 > 0 and noise > 0:
+            blank_noise_median, blank_noise_lower, blank_noise_upper = predict_intensity_noise(model, blank_CR, I1=temp_I1, I2=temp_I2, noise=noise, seed=seed, percentiles=percentiles, return_all=False)
+            noise_target = blank_noise_upper
+        else:
+            noise_target = 0.
+        
+    if isinstance(model_target, np.ndarray):
+        model_target = model_target[0]
+    if isinstance(noise_target, np.ndarray):
+        noise_target = noise_target[0]
+                
+    if debug == True:
+        print()
+        print("    "*(tabs), "getting P=%s thresholds..." % threshold)
+        print("    "*(tabs), "Estimated %s IR thresholds:" % limit.title())
+        print("    "*(tabs+1), "model: %0.1E" % model_target)
+        print("    "*(tabs+1), "noise: %0.1E" % noise_target)
+            
+    # for model_target, evaluate model-only distributions and get CR where median IR equals target
+    if model_target == 0.:
+        LD_model = np.nan
+    else:
+        CR_target = concentration_curve(model, model_target)
+        CR_min = 10**np.floor(np.log10(0.25*CR_target))
+        CR_max = 10**np.ceil(np.log10(4*CR_target))
+        model_CR_range = np.logspace(np.log10(CR_min), np.log10(CR_max), 100)
+        model_medians, model_lower, model_upper = predict_intensity(model, model_CR_range, percentiles=percentiles, return_all=False)
+        if limit == 'upper':
+            LD_model = np.interp(model_target, model_upper, model_CR_range)
+        else:
+            LD_model = np.interp(model_target, model_lower, model_CR_range)
+        
+    if debug == True:
+        print("    "*(tabs), "evaluating model limit...")
+        if np.isnan(LD_model):
+            print("    "*(tabs+1), "   model: %0.1E" % LD_model)
+        else:
+            print("    "*(tabs+1), "CR range: %0.1E - %0.1E" % (CR_min, CR_max))
+            print("    "*(tabs+1), "IR range: %0.1E - %0.1E" % (model_medians[0], model_medians[-1]))
+            print("    "*(tabs+1), "   model: %0.1E" % LD_model)
+    if np.isnan(LD_model) == False:
+        if LD_model <= CR_min or LD_model >= CR_max:
+            raise Exception("caution! predicted model limit is outside evaluated range!")
+    
+    # for noise_target, evaluate model+noise distributions and get CR where median IR equals target
+    if noise_target == 0.:
+        LD_noise = np.nan
+    else:
+        CR_target = concentration_curve(model, noise_target)
+        CR_min = 10**np.floor(np.log10(0.25*CR_target))
+        CR_max = 10**np.ceil(np.log10(4*CR_target))
+        noise_CR_range = np.logspace(np.log10(CR_min), np.log10(CR_max), 100)
+        noise_medians, noise_lower, noise_upper = predict_intensity_noise(model, noise_CR_range, I1=temp_I1, I2=temp_I2, noise=noise, seed=seed, percentiles=percentiles, return_all=False)
+        if limit == 'upper':
+            LD_noise = np.interp(noise_target, noise_upper, noise_CR_range)
+        else:
+            LD_noise = np.interp(noise_target, noise_lower, noise_CR_range)
+    
+    if debug == True:
+        print("    "*(tabs), "evaluating noise limit...")
+        if np.isnan(LD_noise):
+            print("    "*(tabs+1), "   noise: %0.1E" % LD_noise)
+        else:
+            print("    "*(tabs+1), "CR range: %0.1E - %0.1E" % (CR_min, CR_max))
+            print("    "*(tabs+1), "IR range: %0.1E - %0.1E" % (noise_medians[0], noise_medians[-1]))
+            print("    "*(tabs+1), "   noise: %0.1E" % LD_noise)
+    if np.isnan(LD_noise) == False:
+        if LD_noise <= CR_min or LD_noise >= CR_max:
+            raise Exception("caution! predicted noise limit is outside evaluated range!")
+    
+    # clean up output
+    if LD_model < 0:
+        LD_model = np.nan
+    if LD_noise < 0:
+        LD_noise = np.nan
+    
+    if limit == 'upper':
+        LD_overall = np.nanmin([LD_model, LD_noise])
+    else:
+        LD_overall = np.nanmax([LD_model, LD_noise])
+    
+    # plot results if required
+    if show_plot == True or save_plot == True:
+        # set up figure
+        plt.figure(figsize=(6,6))
+        ax1 = plt.subplot(111)
+        ax1.set_title("%s Quant. Limits" % (limit.title()))
+        
+        # plot FXB or FXJ/JA
+        ax1.axhline(blank_model_median, c='k', linestyle='-', label='limit')
+        ax1.axhspan(blank_model_lower, blank_model_upper, facecolor='k', edgecolor='k', linewidth=0., alpha=0.2, hatch='////')
+        if noise > 0:
+            ax1.axhspan(blank_noise_lower, blank_noise_upper, facecolor='k', linewidth=0., alpha=0.2)
+        
+        if debug == True:
+            print("    "*(tabs), "CR range for plotting: %0.1E - %0.1E" % (CR_min, CR_max))
+        
+        # plot model-only data
+        ax1.plot(model_CR_range, model_medians, c='r', label='model')
+        ax1.fill_between(model_CR_range, model_lower, model_upper, facecolor='r', edgecolor='r', linewidth=0., alpha=0.2, hatch='////', label='model %s-%s%%' % (threshold, 100-threshold))
+        
+        # plot model-driven limits
+        ax1.axhline(model_target, c='r', linestyle=':', label='LD (model)')
+        ax1.axvline(LD_model, c='r', linestyle=':')
+        
+        if np.isnan(LD_noise) == False:
+            # plot model+noise data
+            ax1.plot(noise_CR_range, noise_medians, c='b', label='noise')
+            ax1.fill_between(noise_CR_range, noise_lower, noise_upper, facecolor='b', linewidth=0., alpha=0.2, label='noise %s-%s%%' % (threshold, 100-threshold))
+            
+            # plot noise-driven limits
+            ax1.axhline(noise_target, c='b', linestyle=':', label='LD (noise)')
+            ax1.axvline(LD_noise, c='b', linestyle=':')
+        
+        # finish figure
+        ax1.set_xscale('log')
+        ax1.set_yscale('log')
+        ax1.set_xlabel("Theor. CR")
+        ax1.set_ylabel("Theor. IR")
+        if limit == 'upper':
+            ax1.legend(loc='lower right')
+        else:
+            ax1.legend(loc='upper left')
+        plt.tight_layout()
+        if save_plot == True:
+            plt.savefig("%s%s_%s-quantification-limits.png" % (fig_dir, title, limit), dpi=300)
+        if show_plot == True:
+            plt.show()
+        else:
+            plt.close()
+    
+    # return results
+    if return_all == True:
+        return {'model': LD_model, 'noise': LD_noise, 'overall': LD_overall}
+    else:
+        return LD_overall
+    
+    
+    
+    
+    
+    
+    
+
+def detection_limit(model, noise=0., I1=None, I2=None, threshold=5., limit='lower', return_all=False, debug=False):
     # function for estimating the limits of detection for a given measurement and model
     
     # calculate IR from noise level
@@ -3534,8 +4446,8 @@ def detection_limit(model, noise=0., I1=None, I2=None, threshold=5., limit='lowe
         # calculating lower limit from I2
         mode = 'lower'
         # calculate IR from model asymptote
-        IR_model = model['FXB'] + float(threshold) * model['FXB'].std
-        if np.all(I2) == None:
+        IR_model = model['FXB'].value + float(threshold) * model['FXB'].std
+        if np.all(I2 == None):
             I2 = 0.
             IR_noise = 0.
         else:
@@ -3544,8 +4456,8 @@ def detection_limit(model, noise=0., I1=None, I2=None, threshold=5., limit='lowe
         # calculating upper limit from I1
         mode = 'upper'
         # calculate IR from model asymptote
-        IR_model = model['FXJ_JA'] - float(threshold) * model['FXJ_JA'].std
-        if np.all(I1) == None:
+        IR_model = model['FXJ_JA'].value - float(threshold) * model['FXJ_JA'].std
+        if np.all(I1 == None):
             I1 = 0.
             IR_noise = 0.
         else:
@@ -3559,9 +4471,7 @@ def detection_limit(model, noise=0., I1=None, I2=None, threshold=5., limit='lowe
         
     # calculate concentrations from intensity ratios
     CR_noise = concentration_curve(model, IR_noise, debug=debug)
-    CR_noise_error = concentration_error(model, IR_noise, 0., debug=debug)
     CR_model = concentration_curve(model, IR_model, debug=debug)
-    CR_model_error = concentration_error(model, IR_model, 0., debug=debug)
     
     if debug == True:
         print("pred CR noise limit: %0.1E" % CR_noise)
@@ -3571,35 +4481,53 @@ def detection_limit(model, noise=0., I1=None, I2=None, threshold=5., limit='lowe
     if CR_noise <= 0 or np.isnan(CR_noise) == True or np.isinf(CR_noise) == True:
         if mode == 'lower':
             CR_noise = 0.
-            CR_noise_error = 0.
         else:
             CR_noise = np.inf
-            CR_noise_error = np.inf
     if CR_model <= 0 or np.isnan(CR_model) == True or np.isinf(CR_model) == True:
         if mode == 'lower':
             CR_model = 0.
-            CR_model_error = 0.
         else:
             CR_model = np.inf
-            CR_model_error = np.inf
         
     temp = np.asarray([CR_noise, CR_model])
-    temp_err = np.asarray([CR_noise_error, CR_model_error])
     # calculate most conservative limit
     if mode == 'lower':
         i = np.nanargmax(temp)
     else:
         i = np.nanargmin(temp)
     CR_limit = temp[i]
-    CR_limit_error = temp_err[i]
     
     # return values
-    if return_separate_values == True:
-        return {'noise': CR_noise, 'noise_err': CR_noise_error, 'model': CR_model, 'model_err': CR_model_error, 'limit': CR_limit, 'limit_err': CR_limit_error}
-    elif CR_noise > CR_model:
-        return CR_noise, CR_noise_error
+    if return_all == True:
+        return {'noise': CR_noise, 'model': CR_model, 'limit': CR_limit}
     else:
-        CR_limit, CR_limit_error
+        return CR_limit
+
+def confidence_band(model, CR, CR_err=0., alpha=0.05, seed=None):
+    # function for calculating simultaneous confidence bands
+    # code based on Confidence- and prediction intervals example from https://www.astro.rug.nl/software/kapteyn/kmpfittutorial.html
+    
+    # clean up input
+    if isinstance(CR_err, np.ndarray):
+        if np.shape(CR_err) != np.shape(CR):
+            CR_err = np.zeros_like(CR)
+    else:
+        CR_err = np.zeros_like(CR)
+    
+    # determine scale for interval
+    prb = 1. - alpha/2              # critical probability (for alpha=0.05: 0.975)
+    dof = model.n_bootstraps - 3     # degrees of freedom: size of training data - number of parameters
+    tval = stats.t.ppf(prb, dof)    # critical factor
+    
+    # get mean predictions, uncertainties from model
+    y, std = predict_intensity(model, CR, CR_err)
+    
+    # get confidence intervals
+    lower = y - tval * std
+    upper = y + tval * std
+        
+    # return mean, and upper and lower bounds of band
+    return y, lower, upper
 
 """
 # ==================================================
@@ -3607,7 +4535,7 @@ def detection_limit(model, noise=0., I1=None, I2=None, threshold=5., limit='lowe
 # ==================================================
 """
 
-def save_measurement(measurement, keys=[], headers=[], start=None, end=None, do_not_include=[], save_name=None, tabs=0, save_plot=False, show_plot=False, debug=False):
+def save_measurement(measurement, keys=[], headers=[], start=None, end=None, do_not_include=[], out_dir=None, file_name=None, tabs=0, metadata=True, save_plot=False, show_plot=False, debug=False):
     # script for saving a given set of spectra from a measurement
     # argument summary:
     #   - measurement:      Measurement instance containing data
@@ -3626,8 +4554,10 @@ def save_measurement(measurement, keys=[], headers=[], start=None, end=None, do_
         raise Exception("    "*(tabs+1) + "the following keys are missing from measurement:", np.asarray(keys)[check])
     if len(keys) != len(headers):
         raise Exception("    "*(tabs+1) + "header list passed to save_measurement() does not match key list length!")
-    if save_name == None:
-        save_name = "av-spectrum"
+    if out_dir == None:
+        out_dir = measurement.out_dir
+    if file_name == None:
+        file_name = "%s_av-spectrum" % measurement.title
     if debug == True:
         print("    "*(tabs+1) + "file suffix: %s.csv" % save_name)
         
@@ -3700,8 +4630,8 @@ def save_measurement(measurement, keys=[], headers=[], start=None, end=None, do_
         
     # ==================================================
     # generate output folder if missing
-    if not os.path.exists(measurement.out_dir):
-        os.makedirs(measurement.out_dir)
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
     
     # ==================================================
     # convert save_data to pandas DataFrame and save to CSV
@@ -3709,42 +4639,53 @@ def save_measurement(measurement, keys=[], headers=[], start=None, end=None, do_
     if debug == True:
         print("    "*(tabs) + "resulting dataframe:")
         print(save_data.info())
-    save_data.to_csv("%s%s_%s.csv" % (measurement.out_dir, measurement.title, save_name), index=False)
+    save_data.to_csv("%s%s.csv" % (out_dir, file_name), index=False)
     
     # ==================================================
     # generate metadata frame and save to CSV
-    if debug == True:
-        print()
-        print("    "*(tabs) + "generating metadata file for %s" % measurement.title)
-    headers = []
-    values = []
-    # look up most important info
-    for header in ['ID', 'title', 'sample', 'subsample', 'notes', 'measurement_date', 'filename', 'technique', 'laser_wavelength', 'laser_power', 'accumulations', 'exposure_time']:
-        if hasattr(measurement, header):
-            headers.append(header)
-            values.append(measurement[header])
-            if debug == True:
-                print("    "*(tabs+1), header, "=", measurement[header])
-    for header in measurement.__dict__.keys():
-        # for all other attributes of measurement
-        if header in ['x', 'y', 'raman_shift', 'frequency', 'wavelength', 'x_coords', 'y_coords'] or hasattr(measurement[header], 'y'):
-            # attribute is a spectrum array, ignore
-            if debug == True:
-                print("    "*(tabs+1), header, "= spectral data, skipping")
-        elif header not in headers and header not in do_not_include:
-            # add to array
-            headers.append(header)
-            values.append(measurement[header])
-            if debug == True:
-                print("    "*(tabs+1), header, "=", measurement[header])
-    metadata = pd.DataFrame(np.asarray([headers, values]).transpose(), columns=['Parameter', 'Value'])
-    if debug == True:
-        print("    "*(tabs) + "resulting dataframe:")
-        print(metadata.info())
-    metadata.to_csv("%s%s_metadata.csv" % (measurement.out_dir, measurement.title), index=False)
+    if metadata == True:
+        if debug == True:
+            print()
+            print("    "*(tabs) + "generating metadata file for %s" % measurement.title)
+        headers = []
+        values = []
+        # convert measurement info to metadata
+        for header in ['ID', 'title', 'sample', 'subsample', 'notes', 'measurement_date', 'filename', 'technique']:
+            if hasattr(measurement, header):
+                if isinstance(measurement[header], (float, int, str)) == True and header not in headers and header not in do_not_include:
+                    # single value of suitable data type, add to array
+                    headers.append(header)
+                    values.append(measurement[header])
+                    if debug == True:
+                        print("    "*(tabs+1), header, "=", measurement[header])
+                else:
+                    # all other data types get skipped
+                    if debug == True:
+                        print("    "*(tabs+1), header, "skipping %s" % type(measurement[header]))
+        for header in measurement.__dict__.keys():
+            # for all other attributes of measurement
+            if isinstance(measurement[header], (float, int, str)) == True and header not in headers and header not in do_not_include:
+                # single value of suitable data type, add to array
+                headers.append(header)
+                values.append(measurement[header])
+                if debug == True:
+                    print("    "*(tabs+1), header, "=", measurement[header])
+            else:
+                # all other data types get skipped
+                if debug == True:
+                    print("    "*(tabs+1), header, "skipping %s" % type(measurement[header]))
+                
+        metadata = np.asarray([headers, values])
+        if debug == True:
+            print(np.shape(metadata))
+        metadata = pd.DataFrame(metadata.transpose(), columns=['Parameter', 'Value'])
+        if debug == True:
+            print("    "*(tabs) + "resulting dataframe:")
+            print(metadata.info())
+        metadata.to_csv("%s%s_metadata.csv" % (out_dir, file_name), index=False)
     
     # ==================================================
     # end of function
     if debug == True:
         print("    end of save_measurement()")
-    return measurement.out_dir
+    return out_dir
