@@ -1,5 +1,7 @@
 # Quantitative-Raman
-Jupyter Notebooks for training and applying a non-linear quantitative model for predicting concentration ratios from Raman intensity ratios.
+Jupyter Notebooks for training and applying a bootstrapped non-linear quantitative model for predicting concentration ratios from Raman intensity ratios.
+
+The non-linear model is designed to handle a wide range of possible binary mixtures and concentration ratios, including mixtures that have overlapping peaks or otherwise both contribute to either evaluated intensity. By training the model on experimental spectra of a particular mixture across several concentration ratios, the empirical parameters FXJ, FXB, and JA can be determined and then used to predict concentration ratio for samples of unknown concentration. Bootstrapping requires multiple measurements per training sample, but enables estimation of uncertainties in empirical parameters and thus any subsequent predictions. Bootstrapping also enables calculation of limits of detection and quantification according to the parameters and uncertainty of the trained model.
 
 The QuantModel_Synthetic.ipynb notebook generates synthetic data for exploring the effect of different input parameters on the resulting intensity ratio / concentration ratio curves, and the implications for quantitative model training. The QuantModel_Synthetic.ipynb notebook imports experimentally measured spectra for quantitative model training. The OSTRI_functions.py provides the underlying system of standardised python classes and functions (developed by Dr Joseph Razzell Hollis) for handling Raman & FTIR spectra in Python.
 
